@@ -1081,7 +1081,9 @@ func stopTheWorldWithSema() {
 
 	lock(&sched.lock)
 	sched.stopwait = gomaxprocs
+	//标记 gcwaiting，调度时看见此标记会进入等待
 	atomic.Store(&sched.gcwaiting, 1)
+	//发送抢占信号
 	preemptall()
 	// stop current P
 	_g_.m.p.ptr().status = _Pgcstop // Pgcstop is only diagnostic.
@@ -1118,6 +1120,7 @@ func stopTheWorldWithSema() {
 				noteclear(&sched.stopnote)
 				break
 			}
+			//再次发送抢占信号
 			preemptall()
 		}
 	}
@@ -2595,6 +2598,10 @@ func execute(gp *g, inheritTime bool) {
 
 // Finds a runnable goroutine to execute.
 // Tries to steal from other P's, get g from local or global queue, poll network.
+//从3个方面查找等待运行的Goroutine
+//1. 本地运行队列、全局运行队列;
+//2. 网络轮询器中查找;
+//3. 通过runtime.runqsteal尝试从其他随机的处理器中窃取待运行的Goroutine，该函数还可能窃取处理器的计数器;
 func findrunnable() (gp *g, inheritTime bool) {
 	_g_ := getg()
 
@@ -3092,6 +3099,7 @@ func injectglist(glist *gList) {
 
 // One round of scheduler: find a runnable goroutine and execute it.
 // Never returns.
+//调度函数
 func schedule() {
 	_g_ := getg()
 
@@ -3154,6 +3162,8 @@ top:
 		// Check the global runnable queue once in a while to ensure fairness.
 		// Otherwise two goroutines can completely occupy the local runqueue
 		// by constantly respawning each other.
+		//从全局队列中查找对应的Goroutine，
+		//通过schedtick保证有一定几率会从全局的运行队列中查找对应的Goroutine
 		if _g_.m.p.ptr().schedtick%61 == 0 && sched.runqsize > 0 {
 			lock(&sched.lock)
 			gp = globrunqget(_g_.m.p.ptr(), 1)
@@ -3161,6 +3171,7 @@ top:
 		}
 	}
 	if gp == nil {
+		//从本地运行队列中查找待执行的Goroutine
 		gp, inheritTime = runqget(_g_.m.p.ptr())
 		// We can see gp != nil here even if the M is spinning,
 		// if checkTimers added a local goroutine via goready.
@@ -3324,9 +3335,12 @@ func goschedImpl(gp *g) {
 		dumpgstatus(gp)
 		throw("bad g status")
 	}
+	//更新G状态
 	casgstatus(gp, _Grunning, _Grunnable)
+	//解除当前G绑定的M，让出线程
 	dropg()
 	lock(&sched.lock)
+	//加入到全局运行队列中
 	globrunqput(gp)
 	unlock(&sched.lock)
 
@@ -3381,7 +3395,9 @@ func preemptPark(gp *g) {
 	// up. Hence, we set the scan bit to lock down further
 	// transitions until we can dropg.
 	casGToPreemptScan(gp, _Grunning, _Gscan|_Gpreempted)
+	//解除当前G绑定的M，让出线程
 	dropg()
+	//更新当前G的状态
 	casfrom_Gscanstatus(gp, _Gscan|_Gpreempted, _Gpreempted)
 	schedule()
 }
@@ -4060,8 +4076,10 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 	}
 
 	_p_ := _g_.m.p.ptr()
+	//查询gFree列表中有无空闲的Goroutine
 	newg := gfget(_p_)
 	if newg == nil {
+		//如果没有找到一个空闲的Goroutine，会通过这个malg创建一个栈大小足够的新结构体
 		newg = malg(_StackMin)
 		casgstatus(newg, _Gidle, _Gdead)
 		allgadd(newg) // publishes with a g->status of Gdead so GC scanner doesn't look at uninitialized stack.
@@ -4103,6 +4121,7 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 		}
 	}
 
+	//设置新的Goroutine结构体参数，包括栈指针，程序计数器并更新其状态到_Grunnable
 	memclrNoHeapPointers(unsafe.Pointer(&newg.sched), unsafe.Sizeof(newg.sched))
 	newg.sched.sp = sp
 	newg.stktopsp = sp
@@ -4212,8 +4231,12 @@ func gfput(_p_ *p, gp *g) {
 
 // Get from gfree list.
 // If local list is empty, grab a batch from global list.
+//从sched.gFree列表获取一个新的g
 func gfget(_p_ *p) *g {
 retry:
+	//当处理器的Goroutine列表为空时，
+	//会将调度器持有的空闲的Goroutine转移到当前处理器上，
+	//直到gFree列表中的Goroutine数量达到32
 	if _p_.gFree.empty() && (!sched.gFree.stack.empty() || !sched.gFree.noStack.empty()) {
 		lock(&sched.gFree.lock)
 		// Move a batch of free Gs to the P.
@@ -4233,6 +4256,7 @@ retry:
 		unlock(&sched.gFree.lock)
 		goto retry
 	}
+	//当处理器的Goroutine数量充足时,会从列表头部返回一个新的Goroutine
 	gp := _p_.gFree.pop()
 	if gp == nil {
 		return nil
@@ -5143,6 +5167,7 @@ func checkdead() {
 // This is a variable for testing purposes. It normally doesn't change.
 var forcegcperiod int64 = 2 * 60 * 1e9
 
+// 系统监控进程
 // Always runs without a P, so write barriers are not allowed.
 //
 //go:nowritebarrierrec
@@ -5334,7 +5359,7 @@ func retake(now int64) uint32 {
 			if int64(pd.schedtick) != t {
 				pd.schedtick = uint32(t)
 				pd.schedwhen = now
-			} else if pd.schedwhen+forcePreemptNS <= now {
+			} else if pd.schedwhen+forcePreemptNS <= now { // 抢占 G 的执行，如果上一次触发调度的时间已经过去了 10ms
 				preemptone(_p_)
 				// In case of syscall, preemptone() doesn't
 				// work, because there is no M wired to P.
@@ -5346,12 +5371,15 @@ func retake(now int64) uint32 {
 			t := int64(_p_.syscalltick)
 			if !sysretake && int64(pd.syscalltick) != t {
 				pd.syscalltick = uint32(t)
-				pd.syscallwhen = now
+				pd.syscallwhen = now // 系统调用的时间
 				continue
 			}
 			// On the one hand we don't want to retake Ps if there is no other work to do,
 			// but on the other hand we want to retake them eventually
 			// because they can prevent the sysmon thread from deep sleep.
+			// 判断 P 的任务队列是否为空
+			// nmspinning 表示正在窃取 G 的数量
+			// npidle 表示空闲 P 的数量
 			if runqempty(_p_) && atomic.Load(&sched.nmspinning)+atomic.Load(&sched.npidle) > 0 && pd.syscallwhen+10*1000*1000 > now {
 				continue
 			}
@@ -5369,6 +5397,7 @@ func retake(now int64) uint32 {
 				}
 				n++
 				_p_.syscalltick++
+				// 让出处理器的使用权
 				handoffp(_p_)
 			}
 			incidlelocked(1)
@@ -5386,10 +5415,12 @@ func retake(now int64) uint32 {
 // Returns true if preemption request was issued to at least one goroutine.
 func preemptall() bool {
 	res := false
+	//遍历所有的 P
 	for _, _p_ := range allp {
 		if _p_.status != _Prunning {
 			continue
 		}
+		//对正在运行的 P 发送抢占信号
 		if preemptone(_p_) {
 			res = true
 		}
@@ -5408,24 +5439,29 @@ func preemptall() bool {
 // and will be indicated by the gp->status no longer being
 // Grunning
 func preemptone(_p_ *p) bool {
+	//获取 P 对应的 M
 	mp := _p_.m.ptr()
 	if mp == nil || mp == getg().m {
 		return false
 	}
+	//获取 M 正在执行的 G
 	gp := mp.curg
 	if gp == nil || gp == mp.g0 {
 		return false
 	}
 
+	//将 G 标记为抢占
 	gp.preempt = true
 
 	// Every call in a go routine checks for stack overflow by
 	// comparing the current stack pointer to gp->stackguard0.
 	// Setting gp->stackguard0 to StackPreempt folds
 	// preemption into the normal stack overflow check.
+	//在栈扩张的时候会检测是否被抢占
 	gp.stackguard0 = stackPreempt
 
 	// Request an async preemption of this P.
+	//请求该 P 的异步抢占
 	if preemptMSupported && debug.asyncpreemptoff == 0 {
 		_p_.preempt = true
 		preemptM(mp)

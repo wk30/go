@@ -120,6 +120,7 @@ func initsig(preinit bool) {
 		return
 	}
 
+	//遍历信号数组
 	for i := uint32(0); i < _NSIG; i++ {
 		t := &sigtable[i]
 		if t.flags == 0 || t.flags&_SigDefault != 0 {
@@ -366,6 +367,9 @@ func preemptM(mp *m) {
 		// live-lock problem. Apparently this could happen on darwin. See
 		// issue #37741.
 		// Only send a signal if there isn't already one pending.
+		// preemptM向 M 发送抢占请求
+		// 接收到该请求后，如果正在运行的 G 或 P 被标记为抢占，并且 G 处于异步安全点
+		// 则 M 抢占 G
 		signalM(mp, sigPreempt)
 	}
 

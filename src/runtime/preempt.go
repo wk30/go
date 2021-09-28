@@ -202,6 +202,7 @@ func suspendG(gp *g) suspendGState {
 			}
 
 			// Request synchronous preemption.
+			//设置抢占状态
 			gp.preemptStop = true
 			gp.preempt = true
 			gp.stackguard0 = stackPreempt
@@ -210,6 +211,7 @@ func suspendG(gp *g) suspendGState {
 			asyncM2 := gp.m
 			asyncGen2 := atomic.Load(&asyncM2.preemptGen)
 			needAsync := asyncM != asyncM2 || asyncGen != asyncGen2
+			//asyncM 与 asyncGen标记的事循环里上次抢占的信息，用来校验不能重复抢占
 			asyncM = asyncM2
 			asyncGen = asyncGen2
 
@@ -227,8 +229,10 @@ func suspendG(gp *g) suspendGState {
 				// synchronous and the spin loop here
 				// can lead to live-lock.
 				now := nanotime()
+				//限制抢占频率
 				if now >= nextPreemptM {
 					nextPreemptM = now + yieldDelay/2
+					//执行抢占信号发送
 					preemptM(asyncM)
 				}
 			}
@@ -302,9 +306,11 @@ func asyncPreempt()
 func asyncPreempt2() {
 	gp := getg()
 	gp.asyncSafePoint = true
+	//该Goroutine是否可以被抢占
 	if gp.preemptStop {
 		mcall(preemptPark)
 	} else {
+		//让当前G放弃在m上执行的权利，将G放入全局队列等待后续调度
 		mcall(gopreempt_m)
 	}
 	gp.asyncSafePoint = false

@@ -248,6 +248,7 @@ func setGCPercent(in int32) (out int32) {
 
 // Garbage collector phase.
 // Indicates to write barrier and synchronization task to perform.
+//垃圾收集器当前所处的阶段
 var gcphase uint32
 
 // The compiler knows about this variable.
@@ -265,6 +266,7 @@ var writeBarrier struct {
 // gcBlackenEnabled is 1 if mutator assists and background mark
 // workers are allowed to blacken objects. This must only be set when
 // gcphase == _GCmark.
+//当垃圾收集处于标记阶段时，该值被设置成1
 var gcBlackenEnabled uint32
 
 const (

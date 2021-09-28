@@ -185,7 +185,7 @@ func markroot(gcw *gcWork, i uint32) {
 		// mark mspan.specials
 		markrootSpans(gcw, int(i-baseSpans))
 
-	default:
+	default: //扫描各个 G 的栈
 		// the rest is scanning goroutine stacks
 		var gp *g
 		if baseStacks <= i && i < end {
@@ -203,6 +203,7 @@ func markroot(gcw *gcWork, i uint32) {
 
 		// scanstack must be done on the system stack in case
 		// we're trying to scan our own stack.
+		//转交给g0进行扫描
 		systemstack(func() {
 			// If this is a self-scan, put the user G in
 			// _Gwaiting to prevent self-deadlock. It may
@@ -222,6 +223,7 @@ func markroot(gcw *gcWork, i uint32) {
 			// we scan the stacks we can and ask running
 			// goroutines to scan themselves; and the
 			// second blocks.
+			// 挂起 G，让对应的 G 停止运行
 			stopped := suspendG(gp)
 			if stopped.dead {
 				gp.gcscandone = true
@@ -230,8 +232,10 @@ func markroot(gcw *gcWork, i uint32) {
 			if gp.gcscandone {
 				throw("g already scanned")
 			}
+			//扫描 G 的栈
 			scanstack(gp, gcw)
 			gp.gcscandone = true
+			//唤醒刚挂起的G，以便从挂起的安全点开始，进入下次调度
 			resumeG(stopped)
 
 			if selfScan {
